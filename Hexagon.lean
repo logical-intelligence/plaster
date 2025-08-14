@@ -193,4 +193,120 @@ def transferFrom (sender senderFrom recipient : Address) (value : BitVec 256) : 
 def totalBalance (s : ContractState) : Int :=
   s.balanceOf_.values.foldl (init := 0) (· + ·.toNat)
 
+-- Theorems and proofs about the contract behavior
+
+theorem ContractM.run_bind {m1 : ContractM α} {f : α → ContractM β} :
+    ContractM.run (bind m1 f) s = Except.ok (ret, s', events) ↔
+    ∃ s₁ ret₁ events₁ events₂,
+      ContractM.run m1 s = Except.ok (ret₁, s₁, events₁) ∧
+      ContractM.run (f ret₁) s₁ = Except.ok (ret, s', events₂) ∧
+      events = events₁ ++ events₂ := by
+  simp [bind, StateT.bind, StateT.run, WriterT.run, ContractM.run, Except.map, WriterT.mk, Except.bind, Functor.map]
+  constructor
+  intro h
+  · cases h' : m1 s with
+    | error err => simp [h'] at h
+    | ok v =>
+      simp [h'] at h
+      cases h'' : f v.1.1 v.1.2 with
+      | error err => simp [h''] at h
+      | ok v' =>
+        simp [h''] at h
+        exists v.1.2, v.1.1, v.2
+        constructor
+        simp
+        exists v'.2
+        simp [h'', h]
+  · intro h
+    rcases h with ⟨s₁, ret₁, events₁, h₁, events₂, h₂, h₃⟩
+    cases h' : m1 s with
+    | error err => simp [h'] at h₁
+    | ok v =>
+      simp [h'] at h₁
+      simp [h₁]
+      cases h'' : f ret₁ s₁ with
+      | error err => simp [h''] at h₂
+      | ok v' =>
+        simp [h''] at h₂
+        simp [h₂, h₃]
+
+theorem ContractM.run_pure : ContractM.run (pure a) s = Except.ok (a, s, []) := by rfl
+
+theorem ContractM.run_requireM {cond : Bool} {error : Error} :
+    (ContractM.requireM cond error).run s = Except.ok (ret, s', events) ↔ cond ∧ ret = () ∧ events = [] ∧ s = s' := by
+  constructor
+  intro h
+  cases cond with
+  | true =>
+    have h' : ContractM.run (ContractM.requireM true error) s = Except.ok ((), s, []) := by rfl
+    simp [h'] at h
+    simp [h]
+  | false => contradiction
+  intro h
+  simp [h]
+  rfl
+
+theorem ContractM.run_get : ContractM.run (get) s = Except.ok (s, s, []) := by rfl
+
+theorem ContractM.run_set : ContractM.run (set s') s = Except.ok ((), s', []) := by rfl
+
+theorem ContractM.run_emitEvent : ContractM.run (ContractM.emitEvent event) s = Except.ok ((), s, [event]) := by rfl
+
+def updatedState (s : ContractState) (sender recipient : Address) (value : BitVec 256) :=
+  let s := s.updateBalance sender (· - (value + burnPerTransaction))
+  let s := s.updateBalance recipient (· + value)
+  let s := s.updateBalance zeroAddress (· + burnPerTransaction)
+  let s := { s with currentSupply := s.currentSupply - burnPerTransaction }
+  s
+
+theorem currentSupply_state_semantics :
+    ContractM.run (transfer sender recipient value) s = Except.ok (true, s', events) →
+    value + burnPerTransaction ≤ s.balanceOf sender ∧
+    s.balanceOf recipient < s.balanceOf recipient + value ∧
+    s' = updatedState s sender recipient value := by
+  intro h2
+  simp [transfer, _transfer] at h2
+  rw [ContractM.run_bind] at h2
+  rcases h2 with ⟨s₁, ret₁, events₁, events₂, h, h₁, h₂⟩
+  rw [ContractM.run_pure] at h₁
+  apply Except.ok.inj at h₁; simp at h₁
+  simp [h₁] at h₂; simp [h₁, h₂] at h
+  rw [ContractM.run_bind] at h
+  rcases h with ⟨s₁', ret₁', events₁, events₂, h, h₁⟩
+  rw [ContractM.run_requireM] at h
+  simp [h] at h₁; rw [←h.2.2.2] at h₁
+  have h_nz_recepient := h.1
+  rcases h₁ with ⟨h, h₁⟩
+  rw [ContractM.run_bind] at h
+  rcases h with ⟨s₁', ret₁', events₁, events₂, h, h₁⟩
+  rw [ContractM.run_get] at h
+  simp at h
+  simp [h] at h₁; rw [←h.1, ←h.2.1] at h₁
+  rcases h₁ with ⟨h, h₁⟩
+  rw [ContractM.run_bind] at h
+  rcases h with ⟨s₁', ret₁', events₁, events₂, h, h₁⟩
+  simp [ContractM.run_requireM] at h; rw [←h.2.2] at h₁
+  have h_req := h.1
+  rcases h₁ with ⟨h, h₁⟩
+  rw [ContractM.run_bind] at h
+  rcases h with ⟨s₁', ret₁', events₁, events₂, h, h₁⟩
+  simp [ContractM.run_requireM] at h; rw [←h.2.2] at h₁
+  have h_req2 := h.1
+  rcases h₁ with ⟨h, h₁⟩
+  rw [ContractM.run_bind] at h
+  rcases h with ⟨s₁', ret₁', events₁, events₂, h, h₁⟩
+  rw [ContractM.run_set] at h
+  simp [ContractState.updateBalance, ContractState.balanceOf] at h
+  let h_state_update := h.1
+  rcases h₁ with ⟨h, h₁⟩
+  rw [ContractM.run_bind] at h
+  rcases h with ⟨s₁'', ret₁'', events₁, events₂, h, h₁⟩
+  simp [ContractM.run_emitEvent] at h
+  rw [←h.1] at h₁
+  simp [ContractM.run_emitEvent] at h₁
+  rw [h₁.1.1] at h_state_update
+  clear * - h_req h_req2 h_state_update h_nz_recepient
+  unfold updatedState
+  exact ⟨h_req, h_req2, Eq.symm h_state_update⟩
+
 end Hexagon
